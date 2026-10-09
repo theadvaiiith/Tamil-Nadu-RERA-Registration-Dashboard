@@ -469,10 +469,7 @@ else:
                         "One is displayed."
                     )
 
-st.caption(
-    "Entries requiring review are excluded from the relevant ranking. "
-    "Promoters are grouped by cleaned names, not verified company identities."
-)
+
 
 st.subheader("Registered development activity")
 
