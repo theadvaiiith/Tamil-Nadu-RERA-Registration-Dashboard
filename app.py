@@ -2,11 +2,20 @@ from contextlib import closing
 from pathlib import Path
 import sqlite3
 
+from numbers import Number
+
+from uuid import uuid4
+
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 
-from data_prep import prepare_promoters
+from data_prep import (
+    prepare_coordinates,
+    prepare_districts,
+    prepare_dates,
+    prepare_promoters,
+)
 
 st.set_page_config(
     page_title="TN RERA Intelligence",
@@ -17,7 +26,226 @@ st.set_page_config(
 PROJECT_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = PROJECT_DIR / "data" / "rera.db"
 
+def replace_projects(dataframe, database_path, source_filename):
+    if dataframe.empty:
+        raise ValueError("Cannot import an empty dataset.")
+
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    staging_table = f"projects_stage_{uuid4().hex}"
+
+    with closing(sqlite3.connect(database_path, timeout=30)) as connection:
+        try:
+            # Write the upload separately from the current projects table.
+            dataframe.to_sql(
+                staging_table,
+                connection,
+                if_exists="fail",
+                index=False,
+            )
+
+            # Swap the table and its metadata as one transaction.
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute('DROP TABLE IF EXISTS "projects"')
+            connection.execute(
+                f'ALTER TABLE "{staging_table}" RENAME TO "projects"'
+            )
+            connection.execute(
+                'CREATE UNIQUE INDEX projects_rera_id_unique '
+                'ON projects ("RERA ID")'
+            )
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS import_metadata (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    source_filename TEXT NOT NULL,
+                    row_count INTEGER NOT NULL,
+                    imported_at TEXT NOT NULL
+                )
+                """
+            )
+
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO import_metadata
+                    (id, source_filename, row_count, imported_at)
+                VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (source_filename, len(dataframe)),
+            )
+
+            connection.commit()
+
+        except Exception:
+            connection.rollback()
+            connection.execute(
+                f'DROP TABLE IF EXISTS "{staging_table}"'
+            )
+            connection.commit()
+            raise
+
+    return len(dataframe)
+
 st.title("Tamil Nadu RERA Analysis")
+
+
+st.sidebar.header("Dataset upload")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Choose a RERA Excel workbook",
+    type=["xlsx"],
+    help="Use the same 18 source headers as your original workbook.",
+)
+
+prepared_upload = None
+
+if uploaded_file is not None:
+    try:
+        uploaded_df = pd.read_excel(
+            uploaded_file,
+            sheet_name=0,
+            engine="openpyxl",
+        )
+
+        uploaded_df.columns = (
+            uploaded_df.columns.astype(str).str.strip()
+        )
+
+        required_columns = {
+            "S. No", "RERA ID", "Registration Date",
+            "Promoter name", "Project Name", "Latitude",
+            "Longitude", "Approval Board", "Project Plots",
+            "Project District", "Project Taluk", "Project Village",
+            "Approval Date", "Current Status of the Project",
+            "Days after Approval", "Approval Period",
+            "Plot Range", "Year",
+        }
+
+        missing_columns = required_columns - set(uploaded_df.columns)
+        extra_columns = set(uploaded_df.columns) - required_columns
+
+        if uploaded_df.columns.duplicated().any():
+            raise ValueError("Duplicate column headers found.")
+
+        if missing_columns:
+            raise ValueError(
+                f"Missing headers: {', '.join(sorted(missing_columns))}"
+            )
+
+        if extra_columns:
+            raise ValueError(
+                f"Unexpected headers: {', '.join(sorted(extra_columns))}"
+            )
+
+        if uploaded_df.empty:
+            raise ValueError("The first worksheet contains no records.")
+
+        # Registration IDs must be present and unique.
+        rera_ids = uploaded_df["RERA ID"].astype("string").str.strip()
+
+        if rera_ids.isna().any() or rera_ids.eq("").any():
+            raise ValueError("Some records have missing RERA IDs.")
+
+        if rera_ids.duplicated().any():
+            raise ValueError("Duplicate RERA IDs found.")
+
+        uploaded_df["RERA ID"] = rera_ids
+
+        # Plot counts must be positive whole numbers.
+        plots = pd.to_numeric(
+            uploaded_df["Project Plots"],
+            errors="coerce",
+        )
+
+        valid_plots = plots.gt(0) & plots.mod(1).eq(0)
+
+        if not valid_plots.all():
+            raise ValueError(
+                f"{(~valid_plots).sum():,} records have invalid plot counts."
+            )
+
+        uploaded_df["Project Plots"] = plots.astype("int64")
+
+        # Avoid treating raw numeric date cells as Unix timestamps.
+        for column in ["Registration Date", "Approval Date"]:
+            if uploaded_df[column].map(
+                lambda value: isinstance(value, Number)
+            ).any():
+                raise ValueError(
+                    f"{column} contains numeric cells. "
+                    "Format them as Excel dates or day/month/year text."
+                )
+
+        # Reuse our existing preparation pipeline.
+        uploaded_df = prepare_coordinates(uploaded_df)
+        uploaded_df = prepare_districts(uploaded_df)
+        uploaded_df = prepare_dates(uploaded_df)
+        uploaded_df = prepare_promoters(uploaded_df)
+
+        if uploaded_df["registration_date"].isna().any():
+            raise ValueError(
+                "Some registration dates are missing or unreadable."
+            )
+
+        # Assign only after validation succeeds.
+        prepared_upload = uploaded_df
+
+        st.sidebar.success("Workbook validated for import.")
+
+        with st.sidebar.expander("Upload review", expanded=True):
+            st.write({
+                "Registrations": len(prepared_upload),
+                "Recorded plots": int(
+                    prepared_upload["Project Plots"].sum()
+                ),
+                "Coordinate pairs needing review": int(
+                    (~prepared_upload["coordinate_range_valid"]).sum()
+                ),
+                "District labels needing review": int(
+                    prepared_upload["district_review_needed"].sum()
+                ),
+                "Records with date issues": int(
+                    prepared_upload["date_review_needed"].sum()
+                ),
+                "Approval after registration": int(
+                    prepared_upload["approval_sequence_issue"].sum()
+                ),
+            })
+
+        st.sidebar.caption("Import this workbook as the complete replacement dataset.")
+
+    except Exception as error:
+        st.sidebar.error(f"Upload validation failed: {error}")
+
+if prepared_upload is not None:
+    import_clicked = st.sidebar.button(
+        "Replace dataset",
+        type="primary",
+        help="Replaces all current registrations with this validated workbook.",
+    )
+
+    if import_clicked:
+        try:
+            imported_count = replace_projects(
+                prepared_upload,
+                DATABASE_PATH,
+                uploaded_file.name,
+            )
+
+        except Exception as error:
+            st.sidebar.error(f"Database import failed: {error}")
+
+        else:
+            st.session_state["import_success"] = (
+                f"Imported {imported_count:,} registrations successfully."
+            )
+            st.rerun()
+
+if "import_success" in st.session_state:
+    st.sidebar.success(
+        st.session_state.pop("import_success")
+    )
+
 
 # Check that the database has been created.
 if not DATABASE_PATH.exists():
@@ -25,8 +253,34 @@ if not DATABASE_PATH.exists():
     st.stop()
 
 # Retrieve the SQL table into a Pandas DataFrame.
+import_info = None
+
 with closing(sqlite3.connect(DATABASE_PATH)) as connection:
     df = pd.read_sql_query("SELECT * FROM projects", connection)
+
+    metadata_exists = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'import_metadata'
+        """
+    ).fetchone()
+
+    if metadata_exists:
+        import_info = connection.execute(
+            """
+            SELECT source_filename, row_count, imported_at
+            FROM import_metadata
+            WHERE id = 1
+            """
+        ).fetchone()
+
+if import_info:
+    st.sidebar.text(f"Source: {import_info[0]}")
+    st.sidebar.caption(
+        f"{import_info[1]:,} imported registrations · "
+        f"{import_info[2]} UTC"
+    )
 
 # SQLite returns stored dates as text.
 df["registration_date"] = pd.to_datetime(
