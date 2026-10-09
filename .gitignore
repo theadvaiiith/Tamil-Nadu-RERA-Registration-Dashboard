@@ -1,0 +1,19 @@
+# Python environment and generated files
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local datasets and databases
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Credentials
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
