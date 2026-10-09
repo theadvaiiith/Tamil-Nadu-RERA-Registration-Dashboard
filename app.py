@@ -10,6 +10,8 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 
+import pydeck as pdk
+
 from data_prep import (
     prepare_coordinates,
     prepare_districts,
@@ -324,16 +326,58 @@ selected_districts = st.sidebar.multiselect(
     help="Leave empty to include all districts.",
 )
 
-# One filtered DataFrame feeds every dashboard element.
-filtered_df = df.copy()
+# Define the reporting period using valid registration dates.
+valid_dates = df["registration_date"].dropna()
+
+if valid_dates.empty:
+    st.error("The database contains no valid registration dates.")
+    st.stop()
+
+earliest_date = valid_dates.min().date()
+latest_date = valid_dates.max().date()
+
+selected_period = st.sidebar.date_input(
+    "Registration period",
+    value=(earliest_date, latest_date),
+    min_value=earliest_date,
+    max_value=latest_date,
+    format="DD/MM/YYYY",
+)
+
+if len(selected_period) != 2:
+    st.sidebar.info("Select both a start date and an end date.")
+    st.stop()
+
+start_date, end_date = selected_period
+
+# Normalize removes the time component so the end date is fully included.
+filtered_df = df.loc[
+    df["registration_date"].dt.normalize().between(
+        pd.Timestamp(start_date),
+        pd.Timestamp(end_date),
+    )
+].copy()
 
 if selected_districts:
     filtered_df = filtered_df.loc[
         filtered_df["district_display"].isin(selected_districts)
     ]
 
+# Both trend charts will use this same calendar-month range.
+reporting_months = pd.date_range(
+    start=pd.Timestamp(start_date).to_period("M").to_timestamp(),
+    end=pd.Timestamp(end_date).to_period("M").to_timestamp(),
+    freq="MS",
+)
+
 st.sidebar.caption(
     f"Showing {len(filtered_df):,} of {len(df):,} registrations"
+)
+
+st.caption(
+    f"Reporting period: {start_date:%d %b %Y} – {end_date:%d %b %Y}. "
+    "Monthly charts include only records within these dates; "
+    "boundary months may be partial."
 )
 
 # Summary cards.
@@ -405,12 +449,8 @@ with trend_column:
             total_plots=("Project Plots", "sum"),
         )
 
-        # Use the full dataset's month range for consistent comparisons.
-        month_range = pd.date_range(
-            start=df["registration_date"].min().to_period("M").to_timestamp(),
-            end=df["registration_date"].max().to_period("M").to_timestamp(),
-            freq="MS",
-        )
+        # # Use the selected reporting period.
+        month_range = reporting_months
 
         # Include months with no records in the selected districts.
         monthly_summary = (
@@ -546,11 +586,7 @@ else:
         comparison_data["district_clean"].unique().tolist()
     )
 
-    comparison_months = pd.date_range(
-        start=df["registration_date"].min().to_period("M").to_timestamp(),
-        end=df["registration_date"].max().to_period("M").to_timestamp(),
-        freq="MS",
-    )
+    comparison_months = reporting_months
 
     # Include each district in each month, even when its count is zero.
     complete_index = pd.MultiIndex.from_product(
@@ -669,6 +705,132 @@ else:
             "lines are hidden. Months with no activity have undefined shares. "
             "Coverage reflects the uploaded dataset."
         )
+
+
+st.subheader("Project locations")
+
+map_latitude = pd.to_numeric(
+    filtered_df["map_latitude"],
+    errors="coerce",
+)
+map_longitude = pd.to_numeric(
+    filtered_df["map_longitude"],
+    errors="coerce",
+)
+
+numerical_coordinates = (
+    map_latitude.between(-90, 90)
+    & map_longitude.between(-180, 180)
+)
+
+# Broad regional screen; this is not a Tamil Nadu boundary check.
+regional_coordinates = (
+    map_latitude.between(8, 14)
+    & map_longitude.between(76, 81)
+)
+
+map_eligible = numerical_coordinates & regional_coordinates
+map_data = filtered_df.loc[map_eligible].copy()
+
+if map_data.empty:
+    st.info("No coordinates pass the map checks in this selection.")
+else:
+    map_points = map_data[
+        [
+            "map_latitude",
+            "map_longitude",
+            "district_display",
+            "Project Taluk",
+            "RERA ID",
+            "promoter_clean",
+        ]
+    ].rename(
+        columns={
+            "map_latitude": "latitude",
+            "map_longitude": "longitude",
+            "district_display": "district",
+            "Project Taluk": "taluk",
+            "RERA ID": "rera_id",
+            "promoter_clean": "promoter",
+        }
+    )
+
+    tooltip_columns = ["district", "taluk", "rera_id", "promoter"]
+    map_points[tooltip_columns] = (
+        map_points[tooltip_columns].fillna("Unknown").astype(str)
+    )
+
+    positions = map_points[["longitude", "latitude"]].drop_duplicates()
+
+    if len(positions) == 1:
+        view_state = pdk.ViewState(
+            longitude=float(positions.iloc[0]["longitude"]),
+            latitude=float(positions.iloc[0]["latitude"]),
+            zoom=12,
+        )
+    else:
+        view_state = pdk.data_utils.compute_view(positions)
+        view_state.zoom = min(view_state.zoom, 14)
+
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=map_points,
+        get_position="[longitude, latitude]",
+        get_fill_color=[131, 201, 255, 200],
+        get_radius=120,
+        radius_min_pixels=4,
+        radius_max_pixels=12,
+        pickable=True,
+        auto_highlight=True,
+    )
+
+    project_map = pdk.Deck(
+        layers=[layer],
+        initial_view_state=view_state,
+        map_provider="carto",
+        map_style="dark",
+        tooltip={
+            "text": (
+                "District: {district}\n"
+                "Taluk: {taluk}\n"
+                "RERA ID: {rera_id}\n"
+                "Promoter: {promoter}"
+            ),
+            "style": {
+                "backgroundColor": "#262730",
+                "color": "white",
+                "fontSize": "13px",
+            },
+        },
+    )
+
+    st.pydeck_chart(project_map, width="stretch", height=450)
+
+
+st.caption(
+    f"{len(map_data):,} of {len(filtered_df):,} registrations shown. "
+    "Map screening checks numerical ranges and a broad regional window; "
+    "project positions and district assignments still require source verification."
+)
+
+with st.expander("Coordinates needing review"):
+    coordinate_review = filtered_df.loc[
+        ~map_eligible,
+        [
+            "RERA ID",
+            "Project Name",
+            "district_display",
+            "Latitude",
+            "Longitude",
+        ],
+    ].rename(columns={"district_display": "District"})
+
+    st.dataframe(
+        coordinate_review,
+        hide_index=True,
+        width="stretch",
+    )
+
 
 # Project-size analysis follows the same sidebar scope and chart measure.
 st.subheader("Project-size analysis")
