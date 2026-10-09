@@ -1,4 +1,5 @@
 from contextlib import closing
+from html import escape
 from pathlib import Path
 import sqlite3
 
@@ -9,6 +10,7 @@ from uuid import uuid4
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import plotly.io as pio
 
 import pydeck as pdk
 
@@ -24,6 +26,97 @@ st.set_page_config(
     page_icon="🏘️",
     layout="wide",
 )
+
+# Light gray, white, and green visual theme.
+CHART_COLORS = ["#35B567", "#215D3A", "#8ACFA4", "#7D8B82", "#BEDFCB"]
+pio.templates.default = "plotly_white"
+pio.templates["plotly_white"].layout.update(
+    font=dict(family="Arial, sans-serif", color="#24382B"),
+    colorway=CHART_COLORS,
+    xaxis=dict(gridcolor="#E6EBE7", zerolinecolor="#CFD9D1"),
+    yaxis=dict(gridcolor="#E6EBE7", zerolinecolor="#CFD9D1"),
+)
+
+st.html(
+    """
+    <style>
+    .rera-card {
+        box-sizing: border-box;
+        width: 100%;
+        min-height: 164px;
+        padding: 20px;
+        background: #FFFFFF;
+        border: 1px solid #DFE7E1;
+        border-top: 4px solid #35B567;
+        border-radius: 12px;
+        box-shadow: 0 2px 8px rgba(33, 93, 58, 0.04);
+        color: #24382B;
+    }
+    .rera-card-label {
+        font-size: 1rem;
+        font-weight: 600;
+        line-height: 1.4;
+        margin-bottom: 12px;
+    }
+    .rera-card-value {
+        font-size: clamp(1.35rem, 2.1vw, 2rem);
+        font-weight: 700;
+        line-height: 1.25;
+        color: #215D3A;
+        font-variant-numeric: tabular-nums;
+    }
+    .rera-card-note {
+        font-size: 0.8rem;
+        line-height: 1.4;
+        color: #53665A;
+        margin-top: 10px;
+    }
+    .rera-card-label, .rera-card-value, .rera-card-note {
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+        overflow-wrap: anywhere;
+    }
+    [data-testid="stPlotlyChart"] {
+        background: #FFFFFF;
+        border: 1px solid #DFE7E1;
+        border-radius: 12px;
+        padding: 10px;
+    }
+    [class*="st-key-insight_"] {
+        background: #FFFFFF;
+        border-radius: 12px;
+    }
+    [role="tablist"] {
+        gap: 20px;
+        flex-wrap: wrap;
+    }
+    [role="tab"] {
+        padding-top: 12px;
+        padding-bottom: 12px;
+    }
+    [role="tab"][aria-selected="true"] {
+        color: #215D3A !important;
+        font-weight: 600;
+    }
+    </style>
+    """
+)
+
+
+def render_metric_card(label, value, note=None):
+    """Render complete labels and values without metric ellipses."""
+    note_html = (
+        f'<div class="rera-card-note">{escape(str(note))}</div>'
+        if note else ""
+    )
+    st.html(
+        '<section class="rera-card">'
+        f'<div class="rera-card-label">{escape(str(label))}</div>'
+        f'<div class="rera-card-value">{escape(str(value))}</div>'
+        f'{note_html}</section>'
+    )
+
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = PROJECT_DIR / "data" / "rera.db"
@@ -89,7 +182,9 @@ def replace_projects(dataframe, database_path, source_filename):
     return len(dataframe)
 
 st.title("Tamil Nadu RERA Analysis")
-
+st.caption(
+    "Explore registration activity, promoter groups and project locations."
+)
 
 st.sidebar.header("Dataset upload")
 
@@ -248,7 +343,6 @@ if "import_success" in st.session_state:
         st.session_state.pop("import_success")
     )
 
-
 # Check that the database has been created.
 if not DATABASE_PATH.exists():
     st.error("Database not found. Run python load_data.py first.")
@@ -380,36 +474,21 @@ st.caption(
     "boundary months may be partial."
 )
 
-# Summary cards.
-card1, card2, card3, card4 = st.columns(4)
-
-card1.metric(
-    "Registrations",
-    f"{len(filtered_df):,}",
-    border=True,
-)
-
-card2.metric(
-    "Recorded plots",
-    f"{filtered_df['Project Plots'].sum():,}",
-    border=True,
-)
-
-card3.metric(
-    "Recognized districts",
-    f"{filtered_df['district_clean'].nunique():,}",
-    border=True,
-)
-
-card4.metric(
-    "Promoter name groups",
-    f"{filtered_df['promoter_key'].nunique():,}",
-    border=True,
-    help=(
-        "Groups names after whitespace and capitalization cleanup. "
-        "These are not verified unique company identities."
+# Summary cards. Labels and numbers wrap instead of being truncated.
+summary_cards = [
+    ("Registrations", f"{len(filtered_df):,}", None),
+    ("Recorded plots", f"{filtered_df['Project Plots'].sum():,}", None),
+    ("Recognized districts", f"{filtered_df['district_clean'].nunique():,}", None),
+    (
+        "Promoter name groups",
+        f"{filtered_df['promoter_key'].nunique():,}",
+        "Cleaned names; company identities are not verified.",
     ),
-)
+]
+
+for column, (label, value, note) in zip(st.columns(4), summary_cards):
+    with column:
+        render_metric_card(label, value, note)
 
 st.subheader("Insights for this selection")
 
@@ -447,9 +526,10 @@ else:
 
     for column, (title, counts) in zip(insight_columns, insights):
         with column:
-            with st.container(border=True):
+            with st.container(border=True, key="insight_" + "_".join(title.lower().split())):
                 st.markdown(f"#### {title}")
 
+                counts = counts[counts.gt(0)]
                 if counts.empty:
                     st.info("No usable values in this selection.")
                     continue
@@ -458,7 +538,7 @@ else:
                 leaders = counts[counts == highest_count].index.tolist()
 
                 st.write(str(leaders[0]))
-                st.metric("Registrations", f"{highest_count:,}")
+                render_metric_card("Registrations", f"{highest_count:,}")
 
                 share = highest_count / selection_total * 100
                 st.caption(f"{share:.1f}% of selected registrations")
@@ -469,7 +549,10 @@ else:
                         "One is displayed."
                     )
 
-
+st.caption(
+    "Entries requiring review are excluded from the relevant ranking. "
+    "Promoters are grouped by cleaned names, not verified company identities."
+)
 
 st.subheader("Registered development activity")
 
@@ -483,7 +566,6 @@ measure_column = {
     "Registrations": "registrations",
     "Recorded plots": "total_plots",
 }[chart_measure]
-
 
 overview_tab, district_tab, promoter_tab, explorer_tab = st.tabs(
     ["Overview", "District Analysis", "Promoters", "Project Explorer"]
@@ -516,7 +598,7 @@ with overview_tab:
                 total_plots=("Project Plots", "sum"),
             )
 
-            # # Use the selected reporting period.
+            # Use the selected reporting period.
             month_range = reporting_months
 
             # Include months with no records in the selected districts.
@@ -536,13 +618,13 @@ with overview_tab:
                     "month": "Registration month",
                     measure_column: chart_measure,
                 },
-                color_discrete_sequence=["#83C9FF"],
+                color_discrete_sequence=["#35B567"],
             )
 
             trend_figure.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="#0E1117",
-                plot_bgcolor="#0E1117",
+                template="plotly_white",
+                paper_bgcolor="#FFFFFF",
+                plot_bgcolor="#FFFFFF",
                 height=400,
                 margin=dict(l=10, r=10, t=20, b=10),
             )
@@ -597,13 +679,13 @@ with overview_tab:
                     "district_clean": "District",
                     measure_column: chart_measure,
                 },
-                color_discrete_sequence=["#FF4B4B"],
+                color_discrete_sequence=["#215D3A"],
             )
 
             district_figure.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="#0E1117",
-                plot_bgcolor="#0E1117",
+                template="plotly_white",
+                paper_bgcolor="#FFFFFF",
+                plot_bgcolor="#FFFFFF",
                 height=400,
                 margin=dict(l=10, r=10, t=20, b=10),
             )
@@ -740,18 +822,18 @@ with district_tab:
                     "total_plots": ":,.0f",
                 },
                 color_discrete_sequence=[
-                    "#83C9FF",
-                    "#FF4B4B",
-                    "#29B09D",
-                    "#FFD166",
-                    "#B692F6",
+                    "#35B567",
+                    "#215D3A",
+                    "#8ACFA4",
+                    "#7D8B82",
+                    "#BEDFCB",
                 ],
             )
 
             comparison_figure.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="#0E1117",
-                plot_bgcolor="#0E1117",
+                template="plotly_white",
+                paper_bgcolor="#FFFFFF",
+                plot_bgcolor="#FFFFFF",
                 height=420,
                 margin=dict(l=10, r=10, t=20, b=10),
                 legend_title_text="District",
@@ -774,7 +856,6 @@ with district_tab:
                 "lines are hidden. Months with no activity have undefined shares. "
                 "Coverage reflects the uploaded dataset."
             )
-
 
     st.subheader("Project locations")
 
@@ -845,7 +926,7 @@ with district_tab:
             "ScatterplotLayer",
             data=map_points,
             get_position="[longitude, latitude]",
-            get_fill_color=[131, 201, 255, 200],
+            get_fill_color=[53, 181, 103, 210],
             get_radius=120,
             radius_min_pixels=4,
             radius_max_pixels=12,
@@ -857,7 +938,7 @@ with district_tab:
             layers=[layer],
             initial_view_state=view_state,
             map_provider="carto",
-            map_style="dark",
+            map_style="light",
             tooltip={
                 "text": (
                     "District: {district}\n"
@@ -866,15 +947,14 @@ with district_tab:
                     "Promoter: {promoter}"
                 ),
                 "style": {
-                    "backgroundColor": "#262730",
-                    "color": "white",
+                    "backgroundColor": "#FFFFFF",
+                    "color": "#24382B",
                     "fontSize": "13px",
                 },
             },
         )
 
         st.pydeck_chart(project_map, width="stretch", height=450)
-
 
     st.caption(
         f"{len(map_data):,} of {len(filtered_df):,} registrations shown. "
@@ -899,7 +979,6 @@ with district_tab:
             hide_index=True,
             width="stretch",
         )
-
 
     # Project-size analysis follows the same sidebar scope and chart measure.
     st.subheader("Project-size analysis")
@@ -936,12 +1015,12 @@ with district_tab:
                 y=measure_column,
                 labels={"project_size": "Project size", measure_column: chart_measure},
                 hover_data={"registrations": ":,.0f", "total_plots": ":,.0f"},
-                color_discrete_sequence=["#83C9FF"],
+                color_discrete_sequence=["#35B567"],
                 category_orders={"project_size": SIZE_LABELS},
             )
             size_figure.update_layout(
-                template="plotly_dark", paper_bgcolor="#0E1117",
-                plot_bgcolor="#0E1117", height=420,
+                template="plotly_white", paper_bgcolor="#FFFFFF",
+                plot_bgcolor="#FFFFFF", height=420,
                 margin=dict(l=10, r=10, t=20, b=10),
             )
             size_figure.update_yaxes(tickformat=",d", rangemode="tozero")
@@ -977,12 +1056,12 @@ with district_tab:
                     },
                     category_orders={"project_size": SIZE_LABELS},
                     color_discrete_sequence=[
-                        "#83C9FF", "#FF4B4B", "#29B09D", "#FFD166", "#B692F6",
+                        "#35B567", "#215D3A", "#8ACFA4", "#7D8B82", "#BEDFCB",
                     ],
                 )
                 mix_figure.update_layout(
-                    template="plotly_dark", paper_bgcolor="#0E1117",
-                    plot_bgcolor="#0E1117", height=420,
+                    template="plotly_white", paper_bgcolor="#FFFFFF",
+                    plot_bgcolor="#FFFFFF", height=420,
                     margin=dict(l=10, r=10, t=20, b=10),
                 )
                 mix_figure.update_yaxes(categoryorder="total ascending")
@@ -994,7 +1073,6 @@ with district_tab:
         "from size analysis for missing or invalid plot counts. "
         "Unresolved district labels are excluded from the district size-mix chart."
     )
-
 
 with promoter_tab:
     # Promoter rankings and project drill-down.
@@ -1046,13 +1124,13 @@ with promoter_tab:
                     "total_plots": ":,.0f",
                     "recognized_districts": True,
                 },
-                color_discrete_sequence=["#83C9FF"],
+                color_discrete_sequence=["#35B567"],
             )
 
             promoter_figure.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="#0E1117",
-                plot_bgcolor="#0E1117",
+                template="plotly_white",
+                paper_bgcolor="#FFFFFF",
+                plot_bgcolor="#FFFFFF",
                 height=450,
                 margin=dict(l=10, r=10, t=20, b=10),
             )
@@ -1144,7 +1222,6 @@ with promoter_tab:
                 hide_index=True,
                 width="stretch",
             )
-
 
 with explorer_tab:
     # Project detail table.
