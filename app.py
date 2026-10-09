@@ -411,6 +411,69 @@ card4.metric(
     ),
 )
 
+st.subheader("Insights for this selection")
+
+st.caption(
+    "Ranked by registration count using the district and date filters. "
+    "Percentages use all registrations in the current selection."
+)
+
+if filtered_df.empty:
+    st.info("Select a district and date range containing registrations.")
+else:
+    district_counts = filtered_df["district_clean"].dropna().value_counts()
+
+    promoter_counts = filtered_df["promoter_key"].dropna().value_counts()
+    promoter_names = (
+        filtered_df.dropna(subset=["promoter_key"])
+        .drop_duplicates("promoter_key")
+        .set_index("promoter_key")["promoter_clean"]
+    )
+    promoter_counts.index = promoter_counts.index.map(promoter_names)
+
+    size_counts = filtered_df.loc[
+        filtered_df["project_size"].isin(SIZE_LABELS),
+        "project_size",
+    ].value_counts()
+
+    insights = [
+        ("Leading district", district_counts),
+        ("Most active promoter name group", promoter_counts),
+        ("Most common project size", size_counts),
+    ]
+
+    insight_columns = st.columns(3)
+    selection_total = len(filtered_df)
+
+    for column, (title, counts) in zip(insight_columns, insights):
+        with column:
+            with st.container(border=True):
+                st.markdown(f"#### {title}")
+
+                if counts.empty:
+                    st.info("No usable values in this selection.")
+                    continue
+
+                highest_count = int(counts.max())
+                leaders = counts[counts == highest_count].index.tolist()
+
+                st.write(str(leaders[0]))
+                st.metric("Registrations", f"{highest_count:,}")
+
+                share = highest_count / selection_total * 100
+                st.caption(f"{share:.1f}% of selected registrations")
+
+                if len(leaders) > 1:
+                    st.caption(
+                        f"{len(leaders)} entries share first place. "
+                        "One is displayed."
+                    )
+
+st.caption(
+    "Entries requiring review are excluded from the relevant ranking. "
+    "Promoters are grouped by cleaned names, not verified company identities."
+)
+
 st.subheader("Registered development activity")
 
 chart_measure = st.radio(
