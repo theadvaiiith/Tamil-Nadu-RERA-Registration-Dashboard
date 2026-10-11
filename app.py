@@ -18,7 +18,7 @@ import pydeck as pdk
 from groq import (
     Groq, RateLimitError, AuthenticationError, APIConnectionError, APIStatusError,
 )
-from dataset_chat import answer_question
+from dataset_chat import QueryError, answer_question
 
 from data_prep import (
     prepare_coordinates,
@@ -476,6 +476,7 @@ st.sidebar.caption(
 dataset_signature = sha256(
     pd.util.hash_pandas_object(df, index=False).values.tobytes()
     + "\0".join(df.columns.astype(str)).encode("utf-8")
+    + b"rera_analytics_v2"
 ).hexdigest()
 
 if st.session_state.get("chat_dataset_signature") != dataset_signature:
@@ -496,7 +497,7 @@ with st.sidebar:
     with messages_container:
         if not st.session_state["dataset_chat_messages"]:
             st.caption(
-                "Example: Which district has the most registrations?"
+                "Example: Compare average project plots in Chennai and Coimbatore."
             )
 
         for message in st.session_state["dataset_chat_messages"]:
@@ -545,8 +546,10 @@ with st.sidebar:
             reply = {"content": "Groq could not be reached or timed out. Check your connection and try again."}
         except APIStatusError as error:
             reply = {"content": f"Groq returned HTTP {error.status_code}. Check the configured model and try again later."}
+        except QueryError as error:
+            reply = {"content": f"The analysis could not run: {error} Try rephrasing with explicit fields, groups or dates."}
         except ValueError:
-            reply = {"content": "I could not interpret this as a supported dataset request. Try a simpler question with explicit district names or dates."}
+            reply = {"content": "I could not interpret the question reliably. Try rephrasing with explicit fields, groups or dates."}
         except Exception:
             # Avoid exposing secrets or provider response bodies in the public UI.
             reply = {"content": "The chatbot could not answer. Check the [groq] settings in .streamlit/secrets.toml and that dataset_chat.py is beside app.py."}
