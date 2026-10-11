@@ -1,5 +1,6 @@
 from contextlib import closing
 from html import escape
+from hashlib import sha256
 from pathlib import Path
 import sqlite3
 
@@ -13,6 +14,11 @@ import plotly.express as px
 import plotly.io as pio
 
 import pydeck as pdk
+
+from groq import (
+    Groq, RateLimitError, AuthenticationError, APIConnectionError, APIStatusError,
+)
+from dataset_chat import answer_question
 
 from data_prep import (
     prepare_coordinates,
@@ -103,7 +109,6 @@ st.html(
     """
 )
 
-
 def render_metric_card(label, value, note=None):
     """Render complete labels and values without metric ellipses."""
     note_html = (
@@ -116,7 +121,6 @@ def render_metric_card(label, value, note=None):
         f'<div class="rera-card-value">{escape(str(value))}</div>'
         f'{note_html}</section>'
     )
-
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = PROJECT_DIR / "data" / "rera.db"
@@ -467,6 +471,88 @@ reporting_months = pd.date_range(
 st.sidebar.caption(
     f"Showing {len(filtered_df):,} of {len(df):,} registrations"
 )
+
+# Sidebar chatbot: conversation belongs to the current dataset.
+dataset_signature = sha256(
+    pd.util.hash_pandas_object(df, index=False).values.tobytes()
+    + "\0".join(df.columns.astype(str)).encode("utf-8")
+).hexdigest()
+
+if st.session_state.get("chat_dataset_signature") != dataset_signature:
+    st.session_state["chat_dataset_signature"] = dataset_signature
+    st.session_state["dataset_chat_messages"] = []
+
+with st.sidebar:
+    st.divider()
+    st.subheader("Ask the dataset")
+    st.caption("Answers use the full current dataset, independently of the filters above.")
+    st.caption("Groq receives your question; spreadsheet rows stay local. Do not type confidential information.")
+
+    if st.button("Clear conversation", key="clear_dataset_chat"):
+        st.session_state["dataset_chat_messages"] = []
+
+    messages_container = st.container(height=300, border=True)
+
+    with messages_container:
+        if not st.session_state["dataset_chat_messages"]:
+            st.caption(
+                "Example: Which district has the most registrations?"
+            )
+
+        for message in st.session_state["dataset_chat_messages"]:
+            with st.chat_message(message["role"]):
+                st.text(message["content"])
+                if "request" in message:
+                    with st.expander("Interpreted request"):
+                        st.json(message["request"])
+                if message.get("evidence"):
+                    with st.expander("Supporting data"):
+                        st.dataframe(
+                            pd.DataFrame(message["evidence"]),
+                            hide_index=True, use_container_width=True,
+                        )
+
+    question = st.chat_input(
+        "Ask about registrations…",
+        key="dataset_chat_input",
+        max_chars=1000,
+    )
+
+    if question:
+        messages = st.session_state["dataset_chat_messages"]
+        previous_request = next(
+            (message["request"] for message in reversed(messages) if "request" in message),
+            None,
+        )
+        messages.append({"role": "user", "content": question})
+
+        try:
+            settings = st.secrets["groq"]
+            client = Groq(
+                api_key=settings["api_key"], timeout=30, max_retries=0,
+            )
+            with st.spinner("Checking the dataset…"):
+                reply = answer_question(
+                    df, question, client,
+                    model=settings.get("model", "openai/gpt-oss-20b"),
+                    previous_request=previous_request,
+                )
+        except RateLimitError:
+            reply = {"content": "Groq's request limit was reached. Try again later. This app will not upgrade your plan."}
+        except AuthenticationError:
+            reply = {"content": "Groq rejected the API key. Check your local .streamlit/secrets.toml."}
+        except APIConnectionError:
+            reply = {"content": "Groq could not be reached or timed out. Check your connection and try again."}
+        except APIStatusError as error:
+            reply = {"content": f"Groq returned HTTP {error.status_code}. Check the configured model and try again later."}
+        except ValueError:
+            reply = {"content": "I could not interpret this as a supported dataset request. Try a simpler question with explicit district names or dates."}
+        except Exception:
+            # Avoid exposing secrets or provider response bodies in the public UI.
+            reply = {"content": "The chatbot could not answer. Check the [groq] settings in .streamlit/secrets.toml and that dataset_chat.py is beside app.py."}
+
+        messages.append({"role": "assistant", **reply})
+        st.rerun()
 
 st.caption(
     f"Reporting period: {start_date:%d %b %Y} – {end_date:%d %b %Y}. "
