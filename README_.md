@@ -2,7 +2,7 @@
 
 An interactive data analytics dashboard for exploring Tamil Nadu real estate registrations, identifying concentrations of registered development, comparing promoter activity, and building project shortlists.
 
-The project uses **Streamlit, Pandas, SQLite, Plotly, and PyDeck**. A new Excel workbook with the same source headers can be validated and imported through the dashboard, replacing the stored dataset and updating the analysis without editing the application code.
+The project uses **Streamlit, Pandas, SQLite, Plotly, PyDeck, and Groq**. A sidebar chatbot answers supported questions about the current dataset, with calculations performed locally. A new Excel workbook with the same source headers can be validated and imported through the dashboard, replacing the stored dataset and updating the analysis without editing the application code.
 
 Built as a data analytics internship project by **Advaith Krishna S**.
 
@@ -62,6 +62,35 @@ These are indicators of **registered activity**, not direct measures of sales, c
 
 Explorer filters affect the explorer table and its download. The promoter selector affects its detail section. These controls do not change the shared KPI cards or other tabs.
 
+### Dataset chatbot
+
+- Ask questions below the sidebar filters.
+- Get registration counts, recorded-plot totals, district/promoter name-group counts, top rankings, and recent project lists.
+- Filter chatbot results by an exact district or RERA ID, a literal promoter substring, and inclusive registration dates.
+- Inspect **Interpreted request** to check how the question was understood, and **Supporting data** for rankings and project lists.
+- Use the latest successful interpreted request as context for short follow-up questions.
+- Clear the conversation manually, or have it reset automatically when the dataset fingerprint changes.
+
+The chatbot uses the **full current dataset**, independently of the dashboard's district/date filters. State the district or dates in the question when you want a narrower answer.
+
+Groq converts the question into a restricted JSON request. The local code validates that request, retrieves approved fields with Pandas, and formats the answer. It does not execute model-generated SQL or Python. Worksheet rows and calculated results are not sent to Groq; the question and previous successful request are sent for interpretation.
+
+| Example question | Supported behaviour |
+| --- | --- |
+| How many registrations and recorded plots are in this dataset? | Summary of all current records |
+| Which five districts have the most registrations? | Top district groups by registration count |
+| Which five promoters have the most recorded plots? | Top promoter name groups by plot totals |
+| Show the latest five projects in Coimbatore. | Recent matching projects and supporting records |
+| How many registrations were made in Chennai between 2026-01-01 and 2026-09-30? | Summary within the stated district and inclusive dates |
+| Give company passwords. | Refusal; the local keyword guard handles this example before an API call |
+| Which projects will finish next month? | Explains that expected completion dates are outside the available data |
+
+The first version supports **summary**, **rank**, and **projects** requests. Rankings and project lists return at most **20** entries, defaulting to 10. Comparisons, trend calculations, averages, forecasts, and filters by project name, taluk, village, size or status are outside this version's chatbot scope. Several of those analyses remain available through the dashboard controls.
+
+Model interpretation can be wrong even when the JSON is valid. Review the interpreted names, dates, metric and limit. District/RERA filters use exact matches ignoring case and surrounding spaces; the chatbot does not automatically resolve every spelling variation. Equal ranking values are ordered by name, so a top-N limit may omit tied groups.
+
+The chatbot can return only **RERA ID, Project Name, Promoter name, Project District, Project Taluk, Project Village, Project Plots, and Registration Date**. Other columns are excluded from its retrieval. This column boundary is not an authentication system or a classifier for every confidential value: keep confidential information out of these approved fields and out of questions sent to Groq.
+
 ## Technology stack
 
 | Component | Responsibility |
@@ -73,6 +102,7 @@ Explorer filters affect the explorer table and its download. The promoter select
 | SQLite | Local storage for prepared registrations and import metadata |
 | Plotly | Interactive charts |
 | PyDeck | Project map and hover details |
+| Groq SDK | Interpret dataset questions into restricted JSON requests |
 | Git / GitHub | Version control and source sharing |
 
 SQLite is accessed through Python's built-in `sqlite3` module. A separate database server is not required.
@@ -88,7 +118,7 @@ For subsequent imports:
 3. Review the import summary and data-quality flags.
 4. Click **Replace dataset** to import the complete workbook.
 5. The app writes a staging table, then swaps the project table and updates import metadata in a database transaction.
-6. After a successful import, the app reruns and displays the new dataset.
+6. After a successful import, the app reruns and displays the new dataset. The changed dataset fingerprint clears the previous chat, and subsequent questions use the newly loaded records. No model retraining or separate embedding-index rebuild is required.
 
 **An import replaces the complete dataset; it does not append rows or merge incremental changes.** Include all records you want to retain in the new workbook. The app does not watch a folder, poll for new files, or scrape a live registration service.
 
@@ -96,18 +126,20 @@ For subsequent imports:
 
 | Path | Purpose |
 | --- | --- |
-| `app.py` | Dashboard, upload validation, dataset replacement, and visual styling |
+| `app.py` | Dashboard, upload validation, dataset replacement, visual styling, and sidebar chat |
+| `dataset_chat.py` | Approved-field retrieval, Groq question planning, local answer formatting, and offline self-checks |
 | `data_prep.py` | Coordinate, district, date, and promoter preparation functions |
 | `inspect_data.py` | Local workbook inspection and data-quality checks |
 | `load_data.py` | Initial Excel-to-SQLite import |
 | `requirements.txt` | Python dependencies for the project |
 | `.streamlit/config.toml` | Streamlit's light green theme |
+| `.streamlit/secrets.toml` | Local Groq API key and model setting; excluded from Git |
 | `.gitignore` | Excludes local data, databases, virtual environments, and credentials |
 | `README.md` | Project documentation |
 | `data/Cleaned RERA Data.xlsx` | Local input workbook; excluded from Git |
 | `data/rera.db` | Local SQLite database; excluded from Git |
 
-The dashboard requires the supporting project files, particularly `data_prep.py`; `app.py` is not a standalone application.
+The dashboard requires the supporting project files, particularly `data_prep.py` and `dataset_chat.py`; `app.py` is not a standalone application.
 
 ## Run locally
 
@@ -137,7 +169,7 @@ py -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-The required packages include `streamlit`, `pandas`, `openpyxl`, `plotly`, and `pydeck`.
+The required packages include `streamlit`, `pandas`, `openpyxl`, `plotly`, `pydeck`, and `groq`.
 
 ### 4. Provide the local workbook
 
@@ -164,7 +196,37 @@ python load_data.py
 
 Use `load_data.py` for the initial import. Once the database exists, use the dashboard's **Replace dataset** workflow for subsequent full-workbook updates.
 
-### 6. Start the dashboard
+### 6. Configure the chatbot
+
+Create `.streamlit/secrets.toml` locally with your own Groq API key:
+
+```toml
+[groq]
+api_key = "YOUR_GROQ_API_KEY"
+model = "openai/gpt-oss-20b"
+```
+
+Replace the placeholder locally. Add `.streamlit/secrets.toml` to `.gitignore` and keep the real key out of commits, screenshots, and shared files. The Groq SDK is required to import the app; a valid key is needed when using the chatbot.
+
+The selected model must be accessible to your account and support the request format used by `dataset_chat.py`. See [Groq's model documentation](https://console.groq.com/docs/models) and [structured-output documentation](https://console.groq.com/docs/structured-outputs). If a model is unavailable, inspect the model IDs returned by `client.models.list()` for your account.
+
+API errors, authentication failures, connection timeouts, and rate limits are displayed as chat messages. Requests use a 30-second timeout with automatic retries disabled. The app does not upgrade the account's plan.
+
+Run the offline calculation and request-validation checks:
+
+```bash
+python dataset_chat.py
+```
+
+Expected output:
+
+```text
+Retrieval and chatbot checks passed. No real API request was made.
+```
+
+These checks use a fake client and require no real API key or network call. They verify calculations, changed data, approved-column isolation, planner validation, follow-up context, and refusals.
+
+### 7. Start the dashboard
 
 ```bash
 streamlit run app.py
@@ -273,7 +335,7 @@ Overlapping coordinates can place multiple registrations at the same map positio
 
 The source does not provide a confirmed residential/commercial classification or an expected completion date. Therefore, the dashboard does not currently offer project-type analysis, upcoming completion alerts, or completion forecasts. Approval dates and approval periods are not treated as promised completion dates.
 
-The app uses an uploaded workbook, not a live connection to the official registration portal. It has no user authentication or role-based permissions and is intended for local analysis in its current form. Map basemap tiles require an internet connection.
+The app uses an uploaded workbook, not a live connection to the official registration portal. It has no user authentication or role-based permissions and is intended for local analysis in its current form. Map basemap tiles and the Groq chatbot require an internet connection. Local retrieval and the chatbot self-check run without a network call.
 
 ## Verification checklist
 
@@ -289,7 +351,14 @@ After setup or a dashboard change:
 - [ ] Search and filter the explorer, then confirm the CSV matches its shortlist.
 - [ ] Use a separate local copy of the database to exercise workbook replacement and invalid-upload handling without changing the working dataset.
 
-This checklist describes manual acceptance checks, not an automated test suite.
+- [ ] Compare the chatbot's all-data totals with the workbook.
+- [ ] Compare a chatbot district ranking with the dashboard using all districts and the full reporting period.
+- [ ] Inspect the interpreted request for an explicit district/date question.
+- [ ] Check a confidential-information refusal and an unavailable-completion-date question.
+- [ ] Confirm a replacement workbook clears the chat and changes the next answer.
+- [ ] Run `python dataset_chat.py` for the offline self-check.
+
+The checklist describes manual acceptance checks. The chatbot module also provides the small automated offline check described above.
 
 ## Troubleshooting
 
@@ -302,9 +371,16 @@ This checklist describes manual acceptance checks, not an automated test suite.
 | Theme does not change | Confirm the file is `.streamlit/config.toml`, then stop and restart Streamlit |
 | No matching projects | Expand the date range or clear district, search, and explorer selections |
 | Initial loader reports an existing table | Use the dashboard's replacement import for an existing dataset; do not repeatedly run the initial loader |
+| Chatbot settings error | Check the local `.streamlit/secrets.toml` file, its `[groq]` section, and that `dataset_chat.py` is beside `app.py` |
+| Chatbot authentication error | Verify the private Groq key locally |
+| Groq HTTP 404 or unavailable model | Check the configured model against those accessible to your account |
+| Groq request limit reached | Wait and try later; the app does not automatically upgrade the plan |
+| Chatbot times out | Check the connection and try again |
+| Chatbot and filtered chart totals differ | The chatbot uses the full dataset; state filters in the question or clear the dashboard filters for comparison |
+| Chatbot says a question is unsupported | Use a supported summary, top ranking, or latest project request; inspect the interpreted request where available |
 
 ## Source sharing and future work
 
-Keep workbooks, databases, virtual environments, and credentials outside version control. The repository contains application code and configuration; company data remains local. No license is currently specified; add one deliberately before offering the code under particular reuse terms.
+Keep workbooks, databases, virtual environments, and credentials outside version control. The repository contains application code and configuration; worksheet rows and calculated results remain local. Chat questions and previous successful request parameters are sent to Groq; do not include company secrets in either. No license is currently specified; add one deliberately before offering the code under particular reuse terms.
 
-Possible extensions include verified expected-completion and project-type fields, documented coordinate-format conversion, true boundary validation, workbook import history, and access controls for a hosted company deployment. These are future enhancements, not implemented features.
+Possible extensions include verified expected-completion and project-type fields, documented coordinate-format conversion, true boundary validation, workbook import history, additional validated chatbot operations, and access controls for a hosted company deployment. These are future enhancements, not implemented features.
